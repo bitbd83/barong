@@ -12,6 +12,7 @@ module Services
         @device = @account.devices.find_by(uid: session[:device_uid])
 
         unless check_for_otp?
+          account.refresh_failed_attempts
           update_or_create_device!(remember_me: params[:remember_me], session: session)
           create_device_activity!(status: 'success')
           return create_access_token(expires_in: params[:expires_in])
@@ -21,6 +22,7 @@ module Services
         update_or_create_device!(remember_me: params[:remember_me],
                                  session: session, otp: true)
         create_device_activity!(status: 'success')
+        account.refresh_failed_attempts
         create_access_token(expires_in: params[:expires_in])
       end
 
@@ -38,12 +40,14 @@ module Services
 
       def check_otp!(code:)
         if code.blank?
+          account.add_failed_attempt
           create_device_activity!(status: 'missing OTP')
           error!('The account has enabled 2FA but OTP code is missing', 403)
         end
 
         return if Vault::TOTP.validate?(@account.uid, code)
         create_device_activity!(status: 'invalid OTP')
+        account.add_failed_attempt
         error!('OTP code is invalid', 403)
       end
 
@@ -64,8 +68,10 @@ module Services
       def find_account!(params)
         account = Account.kept.find_by(email: params[:email])
         error!('Invalid Email or Password', 401) unless account
+        error!('Your account was locked!', 401) unless account.locked_at.nil?
 
         unless account.valid_password? params[:password]
+          account.add_failed_attempt
           create_device_activity!(status: 'error')
           error!('Invalid Email or Password', 401)
         end
